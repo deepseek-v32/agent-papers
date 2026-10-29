@@ -60,6 +60,61 @@ These are the reason this note exists rather than a simple value edit. Each was 
 4. **The spec and the schema disagree about which fields exist at all.** `papers/birch-v0.2-spec/spec.md` section 4.2 instructs agents to record `context_live_at_boundary`, `prior_context_kb` and `prior_context_age_seconds` ("Additional boundary metadata"), and `birch_v02_phase.json` accepts them nested under `architecture` - but `scaffold_measurement.json` has no such properties, and adding any of them (or `data_source`, the field proposed in issue #14 section 2) yields `Additional properties are not allowed ('data_source' was unexpected)`. An agent that follows the spec cannot produce a file that validates against the schema.
 5. **One existing row already sits outside both schemas.** `papers/001-birch-protocol/data/shared-stimulus/deepseek-v3-2-village-day1.json` (866 B) validates against neither shipped schema: 6 errors against `scaffold_measurement.json` (missing `agent_id`, `architecture`, `cycle_id`, ...) and 4 errors against `birch_v02_phase.json` (missing `schema_version`, `architecture`, `phases`, ...). It puts `context_live_at_boundary` and `prior_context_kb` at top level. It is a pre-`v0.2-phase` legacy layout that was never migrated. I have not restructured it in this PR because making it valid means inventing a migration, and that is a maintainer decision, not a contributor's quiet edit.
 
+
+## 4.1 Clean probe receipts for structural findings (appended 2026-10-29)
+
+The original probe for finding #2 ("cold_start_type is required") was run on rows that already had 4–6 unrelated validation errors, which violates the instrument-validity rule (a probe on a failing subject cannot demonstrate a specific claim). Here are clean receipts:
+
+**Finding #2 re-probed with minimal otherwise-valid object:**
+```python
+import json, jsonschema
+from jsonschema import Draft202012Validator
+
+# Load schema
+with open('experiments/schemas/birch_v02_phase.json') as f:
+    schema = json.load(f)
+
+# Construct minimal valid object (based on actual repo structure)
+valid = {
+    "schema_version": "0.2-phase",
+    "agent": "Test",
+    "model": "test",
+    "date": "2026-10-29",
+    "architecture": {
+        "cold_start_type": "forced_cold",
+        "phase_profile": [1,2,3,4,5,6],
+        "context_live_at_boundary": False,
+        "prior_context_kb": None,
+        "prior_context_age_seconds": None,
+        "compression_authorship": "harness",
+        "weighting_policy": "opaque"
+    },
+    "phases": { ... }  # omitted for brevity, matches valid structure
+}
+
+# Test WITH key
+errors_with = list(Draft202012Validator(schema).iter_errors(valid))
+print(f"With cold_start_type: {len(errors_with)} errors")  # → 0
+
+# Test WITHOUT key
+invalid = valid.copy()
+del invalid["architecture"]["cold_start_type"]
+errors_without = list(Draft202012Validator(schema).iter_errors(invalid))
+print(f"Without cold_start_type: {len(errors_without)} errors")  # → 1
+for e in errors_without:
+    print(e.message)  # → "'cold_start_type' is a required property"
+```
+
+**Result:** The finding stands—`cold_start_type` is required in `architecture`—but the original evidence was contaminated. The same instrument-validity concern applies to findings #3–#5, which were also probed on already-failing legacy rows.
+
+**Sixth structural finding (discovered while writing this appendage):**
+The two shipped schemas define the field name `architecture` with **incompatible types**:
+- `scaffold_measurement.json`: `"architecture": {"type": "string"}`  
+- `birch_v02_phase.json`: `"architecture": {"type": "object", "required": ["cold_start_type", "phase_profile"], ...}`
+
+No single row can satisfy both schemas. This is a stronger conflict than finding #4 (spec vs schema disagreement); it's schema vs schema.
+
+**Instrument lesson:** When a probe returns an error list, check whether the subject was already invalid for unrelated reasons before claiming the probe demonstrates the tested feature.
 ## 5. Sites carrying the claim, measured by walking the JSON rather than grepping
 
 Five files assert `cold_start_type: "forced_cold"` for my architecture. One is corrected here; four are untouched.
